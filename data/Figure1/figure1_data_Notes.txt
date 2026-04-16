@@ -1,0 +1,1 @@
+XYZ coordinates of birds in the two frames used for generating figure 1 are provided. Data from each frame are provided in its own row. XYZ data are provided in triplets--the first bird's XYZ coordinates are in the first three rows, and so on. Data are in meters and were recorded at 29.97 frames per second.

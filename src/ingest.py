@@ -34,7 +34,8 @@ def load_ff_file(path: Path):
     for col in COLUMNS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df = df.dropna(subset=["t_cs", "x", "y", "z", "vx", "vy", "vz"]).copy() 
+    df = df.dropna(subset=["t_cs", "x", "y", "z", "vx", "vy", "vz"]).copy()
+    df = df.sort_values("t_cs").drop_duplicates("t_cs")
     df["t_s"] = df["t_cs"] / 100.0 # convert centiseconds to seconds
     df["speed"] = np.sqrt(df["vx"] ** 2 + df["vy"] ** 2 + df["vz"] ** 2) # calculate speed from velocity components
     df["flight"] = path.parent.name

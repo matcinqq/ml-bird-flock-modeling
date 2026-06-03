@@ -123,6 +123,29 @@ def save_line_svg(
     out_path.write_text(svg, encoding="utf-8")
 
 
+def save_model_rmse_plot(results: pd.DataFrame, out_path: Path):
+    save_line_svg(
+        [
+            (
+                results["horizon_s"].to_numpy(dtype=float),
+                results["baseline_rmse_m"].to_numpy(dtype=float),
+                "#D62728",
+                "constant-velocity baseline",
+            ),
+            (
+                results["horizon_s"].to_numpy(dtype=float),
+                results["ridge_rmse_m"].to_numpy(dtype=float),
+                "#1F77B4",
+                "ridge regression",
+            ),
+        ],
+        title="Prediction RMSE vs horizon",
+        xlabel="prediction horizon [s]",
+        ylabel="RMSE [m]",
+        out_path=out_path,
+    )
+
+
 def build_visuals(all_ff: pd.DataFrame, sample: pd.DataFrame, out_dir: Path):
     """
     Speed over time visualization.
@@ -522,6 +545,205 @@ def compare_train_test_split_strategies(frames: list[pd.DataFrame]):
     }
 
 
+def get_max_dropout_duration(bird_df: pd.DataFrame):
+    g = bird_df.sort_values("t_s").reset_index(drop=True)
+    gps = g["gps_signal"].to_numpy(dtype=float)
+    t = g["t_s"].to_numpy(dtype=float)
+
+    dt = g["t_s"].diff().dropna()
+    dt_median = float(dt.median()) if len(dt) else 0.2
+    if not np.isfinite(dt_median) or dt_median <= 0:
+        dt_median = 0.2
+
+    max_duration = 0.0
+    in_run = False
+    start_idx = 0
+    for i, val in enumerate(gps):
+        is_zero = np.isfinite(val) and val == 0
+        if is_zero and not in_run:
+            in_run = True
+            start_idx = i
+        elif (not is_zero) and in_run:
+            end_idx = i - 1
+            duration = float(max((t[end_idx] - t[start_idx]) + dt_median, dt_median))
+            max_duration = max(max_duration, duration)
+            in_run = False
+
+    if in_run:
+        end_idx = len(gps) - 1
+        duration = float(max((t[end_idx] - t[start_idx]) + dt_median, dt_median))
+        max_duration = max(max_duration, duration)
+
+    return max_duration
+
+
+def split_frames_by_holdout_flights(frames: list[pd.DataFrame], test_fraction: float = 0.2, seed: int = 42):
+    if len(frames) < 2:
+        return frames, []
+
+    order = np.random.default_rng(seed).permutation(len(frames))
+    n_test = max(1, int(round(len(frames) * test_fraction)))
+    test_idx = set(order[:n_test].tolist())
+    train_frames = [frames[i] for i in range(len(frames)) if i not in test_idx]
+    test_frames = [frames[i] for i in range(len(frames)) if i in test_idx]
+    return train_frames, test_frames
+
+
+def build_single_bird_displacement_dataset(
+    frames: list[pd.DataFrame],
+    horizon_s: float,
+    history_steps: int = 6,
+    max_dt_s: float = 0.25,
+):
+    feature_rows = []
+    target_rows = []
+    baseline_rows = []
+
+    horizon_steps = int(round(horizon_s / 0.2))
+    feature_cols_pos = ["x", "y", "z"]
+    feature_cols_vel = ["vx", "vy", "vz"]
+    feature_cols_acc = ["ax", "ay", "az"]
+
+    for df in frames:
+        g = df.sort_values("t_s").reset_index(drop=True)
+        t = g["t_s"].to_numpy(dtype=float)
+        pos = g[feature_cols_pos].to_numpy(dtype=float)
+        vel = g[feature_cols_vel].to_numpy(dtype=float)
+        acc = g[feature_cols_acc].to_numpy(dtype=float)
+
+        start_idx = history_steps - 1
+        end_idx = len(g) - horizon_steps
+        if end_idx <= start_idx:
+            continue
+
+        for i in range(start_idx, end_idx):
+            left = i - history_steps + 1
+            right = i + horizon_steps
+            local_dt = np.diff(t[left : right + 1])
+            if np.any(local_dt <= 0.0) or np.any(local_dt > max_dt_s):
+                continue
+
+            rel_pos_hist = pos[left : i + 1] - pos[i]
+            vel_hist = vel[left : i + 1]
+            acc_hist = acc[left : i + 1]
+            features = np.hstack([rel_pos_hist, vel_hist, acc_hist]).ravel()
+            target_delta = pos[i + horizon_steps] - pos[i]
+            baseline_delta = vel[i] * horizon_s
+
+            feature_rows.append(features)
+            target_rows.append(target_delta)
+            baseline_rows.append(baseline_delta)
+
+    n_features = history_steps * 9
+    if not feature_rows:
+        return (
+            np.empty((0, n_features)),
+            np.empty((0, 3)),
+            np.empty((0, 3)),
+        )
+
+    return (
+        np.vstack(feature_rows),
+        np.vstack(target_rows),
+        np.vstack(baseline_rows),
+    )
+
+
+def fit_ridge_regression_multioutput(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_test: np.ndarray,
+    alpha: float = 1.0,
+):
+    mean = x_train.mean(axis=0)
+    std = x_train.std(axis=0)
+    std[std == 0] = 1.0
+
+    x_train_z = (x_train - mean) / std
+    x_test_z = (x_test - mean) / std
+
+    x_train_aug = np.hstack([x_train_z, np.ones((x_train_z.shape[0], 1))])
+    x_test_aug = np.hstack([x_test_z, np.ones((x_test_z.shape[0], 1))])
+
+    reg = alpha * np.eye(x_train_aug.shape[1])
+    reg[-1, -1] = 0.0
+    beta = np.linalg.solve(x_train_aug.T @ x_train_aug + reg, x_train_aug.T @ y_train)
+    return x_test_aug @ beta
+
+
+def vector_rmse(y_true: np.ndarray, y_pred: np.ndarray):
+    return float(np.sqrt(np.mean(np.sum((y_true - y_pred) ** 2, axis=1))))
+
+
+def evaluate_basic_displacement_model(
+    frames: list[pd.DataFrame],
+    dropout_cutoff_s: float = 60.0,
+    horizons_s: tuple[float, ...] = (0.4, 0.8, 1.6, 3.2),
+    history_steps: int = 6,
+    test_fraction: float = 0.2,
+    seed: int = 42,
+    alpha: float = 1.0,
+):
+    usable_frames = [df for df in frames if get_max_dropout_duration(df) <= dropout_cutoff_s]
+    train_frames, test_frames = split_frames_by_holdout_flights(usable_frames, test_fraction=test_fraction, seed=seed)
+
+    rows = []
+    for horizon_s in horizons_s:
+        x_train, y_train, _ = build_single_bird_displacement_dataset(
+            train_frames,
+            horizon_s,
+            history_steps=history_steps,
+        )
+        x_test, y_test, baseline_test = build_single_bird_displacement_dataset(
+            test_frames,
+            horizon_s,
+            history_steps=history_steps,
+        )
+
+        if len(y_train) == 0 or len(y_test) == 0:
+            rows.append(
+                {
+                    "horizon_s": horizon_s,
+                    "train_samples": int(len(y_train)),
+                    "test_samples": int(len(y_test)),
+                    "baseline_rmse_m": np.nan,
+                    "ridge_rmse_m": np.nan,
+                    "improvement_vs_baseline_pct": np.nan,
+                }
+            )
+            continue
+
+        pred_ridge = fit_ridge_regression_multioutput(x_train, y_train, x_test, alpha=alpha)
+        baseline_rmse = vector_rmse(y_test, baseline_test)
+        ridge_rmse = vector_rmse(y_test, pred_ridge)
+        improvement = float((baseline_rmse - ridge_rmse) / baseline_rmse * 100.0) if baseline_rmse > 0 else np.nan
+
+        rows.append(
+            {
+                "horizon_s": horizon_s,
+                "train_samples": int(len(y_train)),
+                "test_samples": int(len(y_test)),
+                "baseline_rmse_m": baseline_rmse,
+                "ridge_rmse_m": ridge_rmse,
+                "improvement_vs_baseline_pct": improvement,
+            }
+        )
+
+    return {
+        "usable_flights": int(len(usable_frames)),
+        "dropped_flights": int(len(frames) - len(usable_frames)),
+        "train_flights": int(len(train_frames)),
+        "test_flights": int(len(test_frames)),
+        "history_steps": int(history_steps),
+        "history_window_s": float((history_steps - 1) * 0.2),
+        "dropout_cutoff_s": float(dropout_cutoff_s),
+        "test_fraction": float(test_fraction),
+        "seed": int(seed),
+        "alpha": float(alpha),
+        "results": pd.DataFrame(rows).sort_values("horizon_s"),
+    }
+
+
 def main():
     """
     Main function of the program.
@@ -564,6 +786,8 @@ def main():
     dropout_runs, dropout_summary = analyze_gps_dropouts(selected_frames)
     split_cmp = compare_compression_rmse_strategy_a(selected_frames)
     split_strategy_cmp = compare_train_test_split_strategies(selected_frames)
+    model_eval = evaluate_basic_displacement_model(selected_frames)
+    save_model_rmse_plot(model_eval["results"], out_dir / "displacement_model_rmse_by_horizon.svg")
     cutoff_s = 60.0
 
     timeframe_summary = (
@@ -652,6 +876,15 @@ def main():
         f"test_flights={split_strategy_cmp['B_test_flights']}, train_pairs={split_strategy_cmp['B_train_pairs']}, "
         f"test_pairs={split_strategy_cmp['B_test_pairs']}, test_rmse={split_strategy_cmp['B_test_rmse']:.4f}"
     )
+    print()
+    print("Basic displacement model (own history only, held-out flights):")
+    print(
+        f"usable_flights={model_eval['usable_flights']}/{n_selected}, dropped_by_dropout={model_eval['dropped_flights']}, "
+        f"train_flights={model_eval['train_flights']}, test_flights={model_eval['test_flights']}, "
+        f"history_window={model_eval['history_window_s']:.1f}s, ridge_alpha={model_eval['alpha']:.1f}"
+    )
+    print("Target: future displacement (delta x, delta y, delta z)")
+    print(model_eval["results"].to_string(index=False))
     print()
     print("GPS dropout run-length summary (consecutive gps_signal==0):")
     print(

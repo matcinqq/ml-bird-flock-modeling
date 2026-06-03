@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="650">
+<rect x="0" y="0" width="1100" height="650" fill="white" />
+<text x="70" y="35" font-size="22" font-family="Arial">Prediction RMSE vs horizon</text>
+<line x1="70" y1="580" x2="1030" y2="580" stroke="black" />
+<line x1="70" y1="70" x2="70" y2="580" stroke="black" />
+<text x="550.0" y="630" font-size="15" text-anchor="middle">prediction horizon [s]</text>
+<text x="20" y="325.0" font-size="15" transform="rotate(-90, 20, 325.0)" text-anchor="middle">RMSE [m]</text>
+<text x="70" y="598" font-size="12">0.400</text>
+<text x="1030" y="598" font-size="12" text-anchor="end">3.200</text>
+<text x="62" y="580" font-size="12" text-anchor="end">0.009</text>
+<text x="62" y="75" font-size="12" text-anchor="end">9.024</text>
+<polyline fill="none" stroke="#D62728" stroke-width="1.5" points="70.00,570.15 207.14,541.66 481.43,437.53 1030.00,70.00" /><line x1="820" y1="70" x2="850" y2="70" stroke="#D62728" stroke-width="2" /><text x="855" y="74" font-size="14">constant-velocity baseline</text><polyline fill="none" stroke="#1F77B4" stroke-width="1.5" points="70.00,580.00 207.14,575.01 481.43,533.19 1030.00,346.84" /><line x1="820" y1="92" x2="850" y2="92" stroke="#1F77B4" stroke-width="2" /><text x="855" y="96" font-size="14">ridge regression</text>
+</svg>

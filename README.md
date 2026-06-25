@@ -2,13 +2,31 @@
 
 This repository contains the first stage of analysis for pigeon flock trajectory data. The current focus is still exploratory, but it now includes a first simple predictive model in addition to data ingestion, cleaning, quality checks, temporal compression, and train/test split diagnostics.
 
-The main working script is `src/ingest.py`. It reads the `ff*` trajectory files, prepares them for analysis, generates a small set of plots, and prints summary metrics to the terminal.
+The main working script is `src/ingest.py`. It now acts as a thin orchestrator: it calls the modular analysis code under `src/flock/`, generates a small set of plots, and prints summary metrics to the terminal.
+
+## Code Structure
+
+- `src/ingest.py`:
+  entrypoint / orchestrator
+- `src/flock/config.py`:
+  shared constants and project paths
+- `src/flock/data.py`:
+  file loading, numeric cleaning, stationary-period filtering, downsampling
+- `src/flock/plots.py`:
+  SVG plot generation
+- `src/flock/diagnostics.py`:
+  data-quality checks, compression diagnostics, GPS dropout analysis, split diagnostics
+- `src/flock/models.py`:
+  train/test split by flight id, dataset building, ridge baseline, gradient-boosting baseline
+- `src/flock/pipeline.py`:
+  top-level pipeline assembly and terminal reporting
 
 ## Repository Purpose
 
 The goal of the current code is to answer a few practical questions before building a larger model:
 
 - Is the trajectory data being loaded and cleaned correctly?
+- Can obvious non-flight periods be removed before modeling?
 - What happens if the original `0.2s` sampling is compressed to `0.4s` or `0.6s`?
 - How much interpolated GPS data is present?
 - Are GPS dropouts short and harmless, or long enough to make some trajectories unreliable?
@@ -28,7 +46,7 @@ Each file represents one bird trajectory from one free flight. The source datase
 
 ## Current Workflow
 
-`src/ingest.py` currently performs the following steps:
+The pipeline triggered by `src/ingest.py` currently performs the following steps:
 
 1. Load all `ff*` files.
 2. Skip metadata/comment lines from the raw text files.
@@ -41,9 +59,11 @@ Each file represents one bird trajectory from one free flight. The source datase
    - `t_s` = time in seconds
    - `speed` = magnitude of the 3D velocity vector
    - `flight`, `bird`, `source`
-8. Run analysis on half of the available `ff` trajectories.
-9. Evaluate a first displacement-prediction model on held-out flights.
-10. Save basic plots and print summary statistics to the terminal.
+8. Remove long stationary periods:
+   `speed <= 0.25 m/s` for at least `5.0s`
+9. Run analysis on the first half of the available `ff` trajectories (after sorting file paths).
+10. Evaluate predictive baselines on held-out flights.
+11. Save basic plots and print summary statistics to the terminal.
 
 ## Generated Outputs
 
@@ -65,12 +85,14 @@ python3 src/ingest.py
 
 The script prints:
 
+- stationary-period filtering summary
 - sampling interval summary
 - compression comparison (`0.2s`, `0.4s`, `0.6s`)
 - GPS filtering impact
 - usability cutoff results for missing GPS signal
+- compression impact on test RMSE under a fixed `50/50` within-flight split
 - train/test split comparison
-- first-model baseline vs ridge results across prediction horizons
+- baseline vs ridge vs gradient boosting results across prediction horizons
 - GPS dropout duration summary
 
 ## What The Main Metrics Mean
@@ -89,15 +111,19 @@ The script prints:
   error of the constant-velocity baseline for future displacement prediction
 - `ridge_rmse_m`:
   error of the ridge-regression model for future displacement prediction
+- `gb_rmse_m`:
+  error of the gradient-boosting model for future displacement prediction
 - `improvement_vs_baseline_pct`:
   percentage reduction in error relative to the baseline
+- `gb_improvement_vs_baseline_pct`:
+  percentage reduction in error of gradient boosting relative to the baseline
 
 ## First Predictive Model
 
-The first predictive experiment is intentionally simple and interpretable.
+The first predictive experiment is intentionally simple and interpretable, but it now includes a second non-linear baseline for comparison.
 
-- Model:
-  ridge regression
+- Models:
+  ridge regression and gradient boosting
 - Target:
   future displacement of one bird, `Δx, Δy, Δz`
 - Prediction horizons:
@@ -106,16 +132,24 @@ The first predictive experiment is intentionally simple and interpretable.
   recent history of the same bird only
 - Main split:
   whole flights held out for testing
+- Holdout setup:
+  random `80/20` train/test split over unique flight ids (`ff` folders) with seed `42`
 - Filtering:
   remove flights with any single `gps_signal == 0` run longer than `60s`
+- Additional cleaning:
+  remove long stationary periods before modeling:
+  `speed <= 0.25 m/s` for at least `5.0s`
+- Gradient boosting runtime guard:
+  the boosting model is fit on a random cap of `10,000` training examples per horizon so the baseline remains fast enough to run end-to-end
 
 ### Why these choices were made
 
 - Ridge regression was chosen as the first model because it is simple, fast, stable, and easy to interpret. At this stage, the point is to measure whether useful predictive signal exists at all, not to maximize performance with a complex model.
 - The target is displacement (`Δx, Δy, Δz`) rather than absolute future position because predicting absolute position at short horizons can be trivial. A model can look artificially strong by mostly repeating the current state. Predicting displacement forces it to learn change, not identity.
 - Multiple horizons are used because very short prediction horizons can be too easy. The analysis is meant to check how prediction error grows as the horizon becomes more demanding.
-- Whole-flight holdout is treated as the more realistic split because splitting each flight in half leaves train and test very close in time, which makes the task easier and can overestimate generalization.
+- Whole-flight holdout is treated as the more realistic split because splitting each flight in half leaves train and test very close in time, which makes the task easier and can overestimate generalization. The code now splits by flight id (`ff` folder), so all birds from the same flight go entirely to train or entirely to test.
 - A constant-velocity baseline is included so the first model is judged against a physically meaningful naive predictor, not just against zero.
+- Gradient boosting was added as a first non-linear baseline. It is not as interpretable as ridge, but it can reveal whether simple non-linear structure helps before moving to deeper models.
 
 ## Update Summary
 
@@ -134,6 +168,13 @@ Below is a short record of the main development updates so far.
 - removed invalid rows
 - sorted timestamps and removed duplicate timestamps
 - added `t_s` and `speed`
+
+### Update 2B: Stationary-Period Filtering
+
+- removed long near-zero-speed segments before analysis
+- current heuristic:
+  `speed <= 0.25 m/s` for at least `5.0s`
+- this is meant to cut obvious sitting/resting periods that should not be treated as flight dynamics
 
 ### Update 3: Basic Visualization
 
@@ -183,19 +224,28 @@ Below is a short record of the main development updates so far.
 - added a first displacement-prediction model
 - used ridge regression as the initial interpretable baseline model
 - predicted `Δx, Δy, Δz` instead of absolute future position
+- used a random held-out-flight split by unique `ff` identifier (`80/20`, seed `42`) after filtering unusable flights
 - evaluated several prediction horizons
 - compared ridge against a constant-velocity baseline
 - added an RMSE-vs-horizon plot
+
+### Update 10: Gradient Boosting Baseline
+
+- added gradient boosting as a second predictive baseline
+- kept ridge as the main interpretable linear reference
+- limited boosting training size per horizon so the script still runs end-to-end in one pass
 
 ## Current Interpretation
 
 At the moment, the code suggests:
 
+- removing long stationary segments is necessary, because the raw trajectories include clear non-flight periods
 - `0.4s` compression is noticeably better than `0.6s`
 - removing all interpolated GPS points may be too aggressive
 - a cutoff based on a single long dropout is more practical than a cutoff based on total missing time
 - splitting by flights is harder than splitting each flight in half, which likely makes it a stricter and more realistic generalization test
-- the first displacement model beats the constant-velocity baseline across all tested horizons, but error still grows strongly with longer horizons
+- ridge beats the constant-velocity baseline across all tested horizons, but error still grows strongly with longer horizons
+- the current gradient-boosting baseline is mixed: it helps at longer horizons, but it is not uniformly better than ridge
 
 ## Current Limitation
 

@@ -250,3 +250,17 @@ At the moment, the code suggests:
 ## Current Limitation
 
 This repository is still in the exploratory stage. The script is intended for data analysis and decision support, not as a final modeling pipeline yet.
+
+## Timestamped Updates
+
+New project updates can be appended here in chronological order so it is easier to track what changed and when.
+
+### 2026-06-25
+
+- removed long stationary periods before analysis and modeling using the current heuristic:
+  `speed <= 0.25 m/s` for at least `5.0s`
+- corrected the predictive-model holdout split so it is performed by whole flight id (`ff`), not by individual bird trajectory
+- added gradient boosting as a second predictive baseline next to ridge regression
+- refactored the codebase from one large script into smaller modules under `src/flock/`
+- kept `src/ingest.py` as a thin orchestrator that runs the full pipeline
+- updated README so it matches the current code structure and analysis pipeline
